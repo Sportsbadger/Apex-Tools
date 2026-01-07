@@ -14,17 +14,17 @@ global class SapStampCvrBatch implements Database.Batchable<SObject>, Database.S
         this.endDt   = endDt;
     }
 
-    global Database.QueryLocator start(Database.BatchableContext bc) {
-        String soql =
-            'SELECT Id, L4_WBS__c, CVR__c ' +
-            'FROM SAP_Data__c ' +
-            'WHERE CreatedDate >= :startDt ' +
-            'AND CreatedDate < :endDt ' +
-            'AND CVR__c = NULL ' +
-            'AND Type__c = \'Cost Line\' +
-            'AND L4_WBS__c != NULL';
-        return Database.getQueryLocator(soql);
-    }
+	global Database.QueryLocator start(Database.BatchableContext bc) {
+    String soql =
+        'SELECT Id, L4_WBS__c, CVR__c, Type__c ' +
+        'FROM SAP_Data__c ' +
+        'WHERE CreatedDate >= :startDt ' +
+        'AND CreatedDate < :endDt ' +
+        'AND CVR__c = NULL ' +
+        'AND L4_WBS__c != NULL ' +
+        'AND Type__c = \'Cost Line\'';
+    return Database.getQueryLocator(soql);
+	}
 
     global void execute(Database.BatchableContext bc, List<SAP_Data__c> scope) {
         scanned += scope.size();
@@ -88,4 +88,5 @@ global class SapStampCvrBatch implements Database.Batchable<SObject>, Database.S
         );
     }
 }
+
 

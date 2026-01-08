@@ -22,7 +22,7 @@ global class SapStampCvrBatch implements Database.Batchable<SObject>, Database.S
         'AND CreatedDate < :endDt ' +
         'AND CVR__c = NULL ' +
         'AND L4_WBS__c != NULL ' +
-        'AND Type__c = \'Cost Line\'';
+        'AND Type__c IN (\'Cost Line\', \'Aged Debt\')';
     return Database.getQueryLocator(soql);
 	}
 
@@ -88,5 +88,3 @@ global class SapStampCvrBatch implements Database.Batchable<SObject>, Database.S
         );
     }
 }
-
-

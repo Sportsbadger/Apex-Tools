@@ -3,28 +3,41 @@ global class SapStampCvrBatch implements Database.Batchable<SObject>, Database.S
     global final DateTime startDt;
     global final DateTime endDt;
 
+    // When true, the billing-line batch will be started in finish()
+    global final Boolean chainBilling;
+
     // Optional counters for logging/monitoring
     global Integer scanned = 0;
     global Integer stamped = 0;
     global Integer unmatched = 0;
     global Integer ambiguous = 0;
 
-    global SapStampCvrBatch(DateTime startDt, DateTime endDt) {
+    // Primary constructor (allows orchestration control)
+    global SapStampCvrBatch(DateTime startDt, DateTime endDt, Boolean chainBilling) {
         this.startDt = startDt;
         this.endDt   = endDt;
+        this.chainBilling = chainBilling;
     }
 
-	global Database.QueryLocator start(Database.BatchableContext bc) {
-    String soql =
-        'SELECT Id, L4_WBS__c, CVR__c, Type__c ' +
-        'FROM SAP_Data__c ' +
-        'WHERE CreatedDate >= :startDt ' +
-        'AND CreatedDate < :endDt ' +
-        'AND CVR__c = NULL ' +
-        'AND L4_WBS__c != NULL ' +
-        'AND Type__c IN (\'Cost Line\', \'Aged Debt\')';
-    return Database.getQueryLocator(soql);
-	}
+    // Backwards-compatible constructor (no chaining by default)
+    global SapStampCvrBatch(DateTime startDt, DateTime endDt) {
+        this(startDt, endDt, false);
+    }
+
+    global Database.QueryLocator start(Database.BatchableContext bc) {
+        // Stamps CVR via WBS for types that should use L4_WBS__c matching.
+        // Update this IN list as new WBS-driven SAP types are added.
+        String soql =
+            'SELECT Id, L4_WBS__c, CVR__c, Type__c ' +
+            'FROM SAP_Data__c ' +
+            'WHERE CreatedDate >= :startDt ' +
+            'AND CreatedDate < :endDt ' +
+            'AND CVR__c = NULL ' +
+            'AND L4_WBS__c != NULL ' +
+            'AND Type__c IN (\'Cost Line\', \'Aged Debt\')';
+
+        return Database.getQueryLocator(soql);
+    }
 
     global void execute(Database.BatchableContext bc, List<SAP_Data__c> scope) {
         scanned += scope.size();
@@ -36,7 +49,7 @@ global class SapStampCvrBatch implements Database.Batchable<SObject>, Database.S
         }
         if (wbsCodes.isEmpty()) return;
 
-        // Map WBS -> CVR, track ambiguous WBS
+        // Build a map WBS -> CVR, tracking ambiguous WBS codes
         Map<String, Id> wbsToCvr = new Map<String, Id>();
         Set<String> ambiguousWbs = new Set<String>();
 
@@ -56,15 +69,17 @@ global class SapStampCvrBatch implements Database.Batchable<SObject>, Database.S
             }
         }
 
-        // Stamp CVR__c
+        // Stamp CVR__c (skip ambiguous WBS)
         List<SAP_Data__c> updates = new List<SAP_Data__c>();
         for (SAP_Data__c r : scope) {
-            if (ambiguousWbs.contains(r.L4_WBS__c)) {
+            String w = r.L4_WBS__c;
+
+            if (ambiguousWbs.contains(w)) {
                 ambiguous++;
                 continue;
             }
 
-            Id cvrId = wbsToCvr.get(r.L4_WBS__c);
+            Id cvrId = wbsToCvr.get(w);
             if (cvrId != null) {
                 r.CVR__c = cvrId;
                 updates.add(r);
@@ -86,5 +101,13 @@ global class SapStampCvrBatch implements Database.Batchable<SObject>, Database.S
             'scanned=' + scanned + ', stamped=' + stamped +
             ', unmatched=' + unmatched + ', ambiguous=' + ambiguous
         );
+
+        // Orchestrate: only kick Billing Lines batch if requested
+        if (chainBilling) {
+            Database.executeBatch(
+                new SapStampBillingLinesCvrBatch(startDt, endDt),
+                200
+            );
+        }
     }
 }

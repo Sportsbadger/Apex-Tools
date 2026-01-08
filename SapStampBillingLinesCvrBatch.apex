@@ -48,9 +48,10 @@ global class SapStampBillingLinesCvrBatch implements Database.Batchable<SObject>
             SELECT Billing_Document__c, CVR__c
             FROM SAP_Data__c
             WHERE Type__c = 'Cost Line'
-              AND Billing_Document__c IN :billingDocs
-              AND CVR__c != NULL
-        ]) {
+            AND Billing_Document__c IN :billingDocs
+            AND CVR__c != NULL
+            ]) {
+
             String doc = (cost.Billing_Document__c == null) ? null : cost.Billing_Document__c.trim();
             if (String.isBlank(doc)) continue;
 

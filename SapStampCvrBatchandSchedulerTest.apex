@@ -3,7 +3,7 @@ private class SapStampCvrBatchTest {
 
     @TestSetup
     static void makeData() {
-        // --- Your provided SiteTracker setup ---
+
         sitetracker__Project_Template__c template = new sitetracker__Project_Template__c(
             Name = 'Test Template ST 2003',
             sitetracker__Active__c = true
@@ -28,7 +28,7 @@ private class SapStampCvrBatchTest {
         );
         insert cvr;
 
-        // --- Set the Project lookup back to CVR (you said Project has a lookup to CVR) ---
+        // --- Set the Project lookup back to CVR ---
         project.CVR__c = cvr.Id;
         update project;
 
@@ -59,11 +59,9 @@ private class SapStampCvrBatchTest {
         );
         insert new List<SAP_Data__c>{ sapMatch, sapNoMatch };
 
-        // Force CreatedDate to be inside the batch window we will use.
         DateTime startDt = DateTime.now().addHours(-1);
         DateTime endDt   = DateTime.now().addHours(1);
 
-        // Make sure both records are in-range
         Test.setCreatedDate(sapMatch.Id, DateTime.now());
         Test.setCreatedDate(sapNoMatch.Id, DateTime.now());
 
@@ -71,7 +69,6 @@ private class SapStampCvrBatchTest {
             Database.executeBatch(new SapStampCvrBatch(startDt, endDt), 200);
         Test.stopTest();
 
-        // Reload and assert
         Map<Id, SAP_Data__c> reloaded = new Map<Id, SAP_Data__c>([
             SELECT Id, CVR__c, L4_WBS__c
             FROM SAP_Data__c
@@ -92,7 +89,6 @@ private class SapStampCvrBatchTest {
 
     @IsTest
     static void testSchedulerExecutes() {
-        // Insert one SAP row that should match, created "now"
         CVR__c cvr = [SELECT Id FROM CVR__c LIMIT 1];
 
         SAP_Data__c sap = new SAP_Data__c(
@@ -115,15 +111,11 @@ private class SapStampCvrBatchTest {
         );
     }
 
-    // -------------------------------------------------------------------------
-    // NEW TESTS (Billing Line stamping)
-    // -------------------------------------------------------------------------
 
     @IsTest
     static void testBillingBatchStampsFromCostLines() {
         CVR__c cvr = [SELECT Id FROM CVR__c LIMIT 1];
 
-        // Create a COST LINE that can be stamped by WBS
         SAP_Data__c cost = new SAP_Data__c(
             Name = 'Cost Line 1',
             Type__c = 'Cost Line',
@@ -132,7 +124,6 @@ private class SapStampCvrBatchTest {
         );
         insert cost;
 
-        // Create a BILLING LINE that should inherit CVR from the cost line via Billing_Document__c
         SAP_Data__c bill = new SAP_Data__c(
             Name = 'Billing Line 1',
             Type__c = 'Billing Line',
@@ -147,10 +138,7 @@ private class SapStampCvrBatchTest {
         Test.setCreatedDate(bill.Id, DateTime.now());
 
         Test.startTest();
-            // 1) Stamp the cost line (WBS -> CVR).
             Database.executeBatch(new SapStampCvrBatch(startDt, endDt), 200);
-
-            // 2) Stamp billing lines (Billing Doc -> CVR from stamped cost lines)
             Database.executeBatch(new SapStampBillingLinesCvrBatch(startDt, endDt), 200);
         Test.stopTest();
 
@@ -174,10 +162,8 @@ private class SapStampCvrBatchTest {
 
     @IsTest
     static void testBillingBatchSkipsWhenAmbiguous() {
-        // Existing CVR from setup
         CVR__c cvr1 = [SELECT Id FROM CVR__c LIMIT 1];
 
-        // Create a SECOND project + CVR + mapping (only in this test; setup remains untouched)
         sitetracker__Project_Template__c template2 = new sitetracker__Project_Template__c(
             Name = 'Test Template ST 2003 - 2',
             sitetracker__Active__c = true
@@ -204,7 +190,6 @@ private class SapStampCvrBatchTest {
         project2.CVR__c = cvr2.Id;
         update project2;
 
-        // Mapping for second CVR
         Project_WBS__c map2 = new Project_WBS__c(
             Project__c = project2.Id,
             CVR__c = cvr2.Id,
@@ -212,22 +197,20 @@ private class SapStampCvrBatchTest {
         );
         insert map2;
 
-        // Two cost lines with SAME billing doc but different WBS -> different CVRs
         SAP_Data__c cost1 = new SAP_Data__c(
             Name = 'Cost Amb 1',
             Type__c = 'Cost Line',
-            L4_WBS__c = 'TEST-WBS-001',   // maps to cvr1
+            L4_WBS__c = 'TEST-WBS-001',
             Billing_Document__c = 'BILL-AMB'
         );
         SAP_Data__c cost2 = new SAP_Data__c(
             Name = 'Cost Amb 2',
             Type__c = 'Cost Line',
-            L4_WBS__c = 'TEST-WBS-002',   // maps to cvr2
+            L4_WBS__c = 'TEST-WBS-002',
             Billing_Document__c = 'BILL-AMB'
         );
         insert new List<SAP_Data__c>{ cost1, cost2 };
 
-        // Billing line that references the ambiguous billing doc
         SAP_Data__c bill = new SAP_Data__c(
             Name = 'Billing Amb',
             Type__c = 'Billing Line',
@@ -243,10 +226,7 @@ private class SapStampCvrBatchTest {
         Test.setCreatedDate(bill.Id, DateTime.now());
 
         Test.startTest();
-            // Stamp cost lines first
             Database.executeBatch(new SapStampCvrBatch(startDt, endDt), 200);
-
-            // Then attempt to stamp billing line; should detect ambiguity and skip
             Database.executeBatch(new SapStampBillingLinesCvrBatch(startDt, endDt), 200);
         Test.stopTest();
 
@@ -256,6 +236,36 @@ private class SapStampCvrBatchTest {
             null,
             bill.CVR__c,
             'Billing Line should remain unstamped when Billing_Document__c maps to multiple CVRs'
+        );
+    }
+
+    @IsTest
+    static void testAgedDebtStampsCvr() {
+        CVR__c cvr = [SELECT Id FROM CVR__c LIMIT 1];
+
+        // Aged Debt row should stamp via L4_WBS__c (same as Cost Line)
+        SAP_Data__c agedDebt = new SAP_Data__c(
+            Name = 'Aged Debt 1',
+            Type__c = 'Aged Debt',
+            L4_WBS__c = 'TEST-WBS-001'
+        );
+        insert agedDebt;
+
+        DateTime startDt = DateTime.now().addHours(-1);
+        DateTime endDt   = DateTime.now().addHours(1);
+
+        Test.setCreatedDate(agedDebt.Id, DateTime.now());
+
+        Test.startTest();
+            Database.executeBatch(new SapStampCvrBatch(startDt, endDt), 200);
+        Test.stopTest();
+
+        agedDebt = [SELECT CVR__c FROM SAP_Data__c WHERE Id = :agedDebt.Id];
+
+        System.assertEquals(
+            cvr.Id,
+            agedDebt.CVR__c,
+            'Aged Debt should be stamped by WBS batch when L4_WBS__c matches'
         );
     }
 }

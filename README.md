@@ -14,7 +14,10 @@ Batch and scheduler classes to stamp `SAP_Data__c.CVR__c` based on WBS mappings 
 
 - **`SapStampCvrBatch`**: Stamps `SAP_Data__c` **Cost Line** rows by mapping `L4_WBS__c` to `Project_WBS__c.CVR__c`.
 - **`SapStampBillingLinesCvrBatch`**: Stamps **Billing Line** rows by deriving `CVR__c` from stamped **Cost Line** records that share the same `Billing_Document__c`.
-- **`SapStampCvrScheduler`**: Schedules daily execution for a rolling 24‑hour window.
+- **`SapStampCvrScheduler`**: Schedules daily SAP cost-line stamping for a rolling 24‑hour window and chains billing-line stamping in `finish()`.
+- **`SapStampBillingLinesScheduler`**: Standalone scheduler for **Billing Line** stamping when you need to run that batch independently.
+- **`CoupaStampCvrBatch`**: Stamps `Coupa_Data__c` rows by mapping `L4_WBS__c` to `Project_WBS__c.CVR__c`.
+- **`CoupaStampCvrScheduler`**: Schedules daily Coupa stamping using the same cutover/backfill settings as SAP.
 - **`SapStampCvrBatchandSchedulerTest`**: Unit tests covering WBS stamping, scheduler execution, billing line inheritance, and ambiguity handling.
 
 ## Pre-requisite objects and fields
@@ -24,6 +27,7 @@ Batch and scheduler classes to stamp `SAP_Data__c.CVR__c` based on WBS mappings 
 ### Required objects
 
 - `SAP_Data__c` (custom object)
+- `Coupa_Data__c` (custom object)
 - `Project_WBS__c` (custom object)
 - `CVR__c` (custom object)
 - `sitetracker__Project__c`, `sitetracker__Project_Template__c`, `sitetracker__Site__c` (from the SiteTracker managed package, used by tests)
@@ -34,6 +38,11 @@ Batch and scheduler classes to stamp `SAP_Data__c.CVR__c` based on WBS mappings 
 - `Type__c` (Text) — values used: `Cost Line`, `Billing Line`, `Aged Debt`
 - `L4_WBS__c` (Text)
 - `Billing_Document__c` (Text)
+- `CVR__c` (Lookup to `CVR__c`)
+- `CreatedDate` (standard)
+
+**`Coupa_Data__c`**
+- `L4_WBS__c` (Text)
 - `CVR__c` (Lookup to `CVR__c`)
 - `CreatedDate` (standard)
 
@@ -63,6 +72,7 @@ If this CMDT does not exist, the scheduler falls back to defaults.
 ## Data model assumptions
 
 - `SAP_Data__c` has fields: `Type__c`, `L4_WBS__c`, `Billing_Document__c`, `CVR__c`.
+- `Coupa_Data__c` has fields: `L4_WBS__c`, `CVR__c`.
 - `Project_WBS__c` maps `WBS_Code__c` ➜ `CVR__c`.
 - `CVR__c` relates to `sitetracker__Project__c` (per test setup).
 
@@ -92,7 +102,25 @@ If this CMDT does not exist, the scheduler falls back to defaults.
   - If a billing document maps to multiple CVRs, mark as **ambiguous** and skip.
   - Stamp `SAP_Data__c.CVR__c` when a single match exists.
 
+### Coupa stamping (`CoupaStampCvrBatch`)
+
+- **Scope**: `Coupa_Data__c` with
+  - `CVR__c = NULL`
+  - `L4_WBS__c != NULL`
+  - `CreatedDate` within `[startDt, endDt)`
+- **Logic**:
+  - Build `WBS_Code__c ➜ CVR__c` map from `Project_WBS__c`.
+  - If a WBS maps to multiple CVRs, mark as **ambiguous** and skip.
+  - Stamp `Coupa_Data__c.CVR__c` when a single match exists.
+
 ## Scheduling (how to run it on a schedule)
+
+### Why schedulers exist
+
+- **Reliability**: Each scheduler enforces a repeatable **cutover window** so new data is processed once per day without gaps or overlaps.
+- **Operational safety**: Backfill mode allows controlled reprocessing over a defined number of days without changing batch code.
+- **Decoupling**: SAP cost-line stamping can chain billing-line stamping, while the billing-only scheduler is available for replays or isolated fixes.
+- **Consistency**: SAP and Coupa use the same Custom Metadata settings (`Sap_Stamp_Settings__mdt.Default`) to reduce operational drift.
 
 ### Default behavior
 
@@ -108,11 +136,27 @@ If this CMDT does not exist, the scheduler falls back to defaults.
 SapStampCvrScheduler.scheduleDaily('SAP CVR Stamping Daily', 3, 0);
 ```
 
+```apex
+// Example: schedule Coupa stamping for 03:00 daily
+CoupaStampCvrScheduler.scheduleDaily('Coupa CVR Stamping Daily', 3, 0);
+```
+
+```apex
+// Example: schedule Billing Lines stamping for 03:00 daily
+SapStampBillingLinesScheduler.scheduleDaily('SAP Billing Lines Daily', 3, 0);
+```
+
 ### Run once at a specific time
 
 ```apex
 SapStampCvrScheduler.scheduleTodayAt('SAP CVR Stamping One-Off', 14, 30);
 ```
+
+```apex
+CoupaStampCvrScheduler.scheduleTodayAt('Coupa CVR Stamping One-Off', 14, 30);
+```
+
+> `SapStampBillingLinesScheduler` does not include a `scheduleTodayAt` helper; use `System.schedule` with a one-time cron if needed.
 
 ### Run immediately (ad-hoc batch execution)
 
@@ -121,6 +165,12 @@ DateTime startDt = DateTime.now().addDays(-1);
 DateTime endDt = DateTime.now();
 Database.executeBatch(new SapStampCvrBatch(startDt, endDt), 200);
 Database.executeBatch(new SapStampBillingLinesCvrBatch(startDt, endDt), 200);
+```
+
+```apex
+DateTime startDt = DateTime.now().addDays(-1);
+DateTime endDt = DateTime.now();
+Database.executeBatch(new CoupaStampCvrBatch(startDt, endDt), 200);
 ```
 
 ## Testing

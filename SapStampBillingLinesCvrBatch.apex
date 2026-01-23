@@ -15,9 +15,9 @@ global class SapStampBillingLinesCvrBatch implements Database.Batchable<SObject>
     }
 
     global Database.QueryLocator start(Database.BatchableContext bc) {
-        // Only Billing Lines in the window that still need CVR stamping
+        // Only Billing Lines in the window that still need stamping
         String soql =
-            'SELECT Id, CVR__c, Type__c, Billing_Document__c ' +
+            'SELECT Id, CVR__c, Project__c, Type__c, Billing_Document__c ' +
             'FROM SAP_Data__c ' +
             'WHERE CreatedDate >= :startDt ' +
             'AND CreatedDate < :endDt ' +
@@ -39,28 +39,34 @@ global class SapStampBillingLinesCvrBatch implements Database.Batchable<SObject>
         }
         if (billingDocs.isEmpty()) return;
 
-        // Build map BillingDoc -> CVR from COST LINES that are already stamped
+        // Build maps BillingDoc -> CVR and BillingDoc -> Project from COST LINES that are already stamped
         Map<String, Id> docToCvr = new Map<String, Id>();
+        Map<String, Id> docToProject = new Map<String, Id>();
         Set<String> ambiguousDocs = new Set<String>();
 
-        // Query cost lines for those billing docs
+        // Query cost lines for those billing docs (COST LINE is the source of truth)
         for (SAP_Data__c cost : [
-            SELECT Billing_Document__c, CVR__c
+            SELECT Billing_Document__c, CVR__c, Project__c
             FROM SAP_Data__c
             WHERE Type__c = 'Cost Line'
-            AND Billing_Document__c IN :billingDocs
-            AND CVR__c != NULL
-            ]) {
-
+              AND Billing_Document__c IN :billingDocs
+              AND CVR__c != NULL
+              AND Project__c != NULL
+        ]) {
             String doc = (cost.Billing_Document__c == null) ? null : cost.Billing_Document__c.trim();
             if (String.isBlank(doc)) continue;
 
             Id cvrId = cost.CVR__c;
+            Id projectId = cost.Project__c;
 
             if (!docToCvr.containsKey(doc)) {
                 docToCvr.put(doc, cvrId);
-            } else if (docToCvr.get(doc) != cvrId) {
-                ambiguousDocs.add(doc);
+                docToProject.put(doc, projectId);
+            } else {
+                // Ambiguous if either CVR or Project differs for same Billing Doc
+                if (docToCvr.get(doc) != cvrId || docToProject.get(doc) != projectId) {
+                    ambiguousDocs.add(doc);
+                }
             }
         }
 
@@ -80,8 +86,11 @@ global class SapStampBillingLinesCvrBatch implements Database.Batchable<SObject>
             }
 
             Id cvrId = docToCvr.get(doc);
-            if (cvrId != null) {
+            Id projectId = docToProject.get(doc);
+
+            if (cvrId != null && projectId != null) {
                 bill.CVR__c = cvrId;
+                bill.Project__c = projectId;
                 updates.add(bill);
                 stamped++;
             } else {

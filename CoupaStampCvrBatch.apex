@@ -1,5 +1,5 @@
 // =====================================================
-// 1) Batch: CoupaStampCvrBatch
+// 1) Batch: CoupaStampCvrBatch  
 // =====================================================
 global class CoupaStampCvrBatch implements Database.Batchable<SObject>, Database.Stateful {
 
@@ -15,8 +15,8 @@ global class CoupaStampCvrBatch implements Database.Batchable<SObject>, Database
     global Integer unmatched = 0;
     global Integer ambiguous = 0;
 
-    // Debug toggle (set false in prod if you want quieter logs)
-    public static final Boolean DEBUG = true;
+    // Debug toggle 
+    public static final Boolean DEBUG = false;
     public static final Integer DEBUG_SAMPLE_SIZE = 25;
 
     global Set<String> dbgWbsSeen = new Set<String>();
@@ -35,8 +35,9 @@ global class CoupaStampCvrBatch implements Database.Batchable<SObject>, Database
     }
 
     global Database.QueryLocator start(Database.BatchableContext bc) {
+        // NOTE: include Project__c so we can stamp it
         String soql =
-            'SELECT Id, Name, L4_WBS__c, CVR__c ' +
+            'SELECT Id, Name, L4_WBS__c, CVR__c, Project__c ' +
             'FROM Coupa_Data__c ' +
             'WHERE CreatedDate >= :startDt ' +
             'AND CreatedDate < :endDt ' +
@@ -66,25 +67,32 @@ global class CoupaStampCvrBatch implements Database.Batchable<SObject>, Database
         }
         if (wbsCodes.isEmpty()) return;
 
-        // Map WBS -> CVR and track ambiguous WBS
+        // Map WBS -> CVR AND WBS -> Project; track ambiguous WBS
         Map<String, Id> wbsToCvr = new Map<String, Id>();
+        Map<String, Id> wbsToProject = new Map<String, Id>();
         Set<String> ambiguousWbs = new Set<String>();
 
         for (Project_WBS__c m : [
-            SELECT WBS_Code__c, CVR__c
+            SELECT WBS_Code__c, CVR__c, Project__c
             FROM Project_WBS__c
             WHERE WBS_Code__c IN :wbsCodes
               AND CVR__c != NULL
+              AND Project__c != NULL
         ]) {
             String w = (m.WBS_Code__c == null) ? null : m.WBS_Code__c.trim();
             if (String.isBlank(w)) continue;
 
             Id cvrId = m.CVR__c;
+            Id projectId = m.Project__c;
 
             if (!wbsToCvr.containsKey(w)) {
                 wbsToCvr.put(w, cvrId);
-            } else if (wbsToCvr.get(w) != cvrId) {
-                ambiguousWbs.add(w);
+                wbsToProject.put(w, projectId);
+            } else {
+                // Ambiguous if either CVR or Project differs for same WBS
+                if (wbsToCvr.get(w) != cvrId || wbsToProject.get(w) != projectId) {
+                    ambiguousWbs.add(w);
+                }
             }
         }
 
@@ -118,13 +126,16 @@ global class CoupaStampCvrBatch implements Database.Batchable<SObject>, Database
             }
 
             Id cvrId = wbsToCvr.get(w);
-            if (cvrId != null) {
+            Id projectId = wbsToProject.get(w);
+
+            if (cvrId != null && projectId != null) {
                 r.CVR__c = cvrId;
+                r.Project__c = projectId;
                 updates.add(r);
                 stamped++;
 
                 if (DEBUG && dbgSampleStamped.size() < DEBUG_SAMPLE_SIZE) {
-                    dbgSampleStamped.add('Id=' + r.Id + ' WBS=' + w + ' -> CVR=' + cvrId);
+                    dbgSampleStamped.add('Id=' + r.Id + ' WBS=' + w + ' -> CVR=' + cvrId + ' Project=' + projectId);
                 }
             } else {
                 unmatched++;

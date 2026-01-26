@@ -1,5 +1,5 @@
 // =====================================================
-// 1) Batch: CoupaStampCvrBatch  
+// 1) Batch: CoupaStampCvrBatch
 // =====================================================
 global class CoupaStampCvrBatch implements Database.Batchable<SObject>, Database.Stateful {
 
@@ -15,7 +15,7 @@ global class CoupaStampCvrBatch implements Database.Batchable<SObject>, Database
     global Integer unmatched = 0;
     global Integer ambiguous = 0;
 
-    // Debug toggle 
+    // Debug toggle
     public static final Boolean DEBUG = false;
     public static final Integer DEBUG_SAMPLE_SIZE = 25;
 
@@ -35,9 +35,9 @@ global class CoupaStampCvrBatch implements Database.Batchable<SObject>, Database
     }
 
     global Database.QueryLocator start(Database.BatchableContext bc) {
-        // NOTE: include Project__c so we can stamp it
+        // Include WBS_Key__c so we can stamp it too
         String soql =
-            'SELECT Id, Name, L4_WBS__c, CVR__c, Project__c ' +
+            'SELECT Id, Name, L4_WBS__c, WBS_Key__c, CVR__c, Project__c ' +
             'FROM Coupa_Data__c ' +
             'WHERE CreatedDate >= :startDt ' +
             'AND CreatedDate < :endDt ' +
@@ -67,31 +67,45 @@ global class CoupaStampCvrBatch implements Database.Batchable<SObject>, Database
         }
         if (wbsCodes.isEmpty()) return;
 
-        // Map WBS -> CVR AND WBS -> Project; track ambiguous WBS
-        Map<String, Id> wbsToCvr = new Map<String, Id>();
-        Map<String, Id> wbsToProject = new Map<String, Id>();
-        Set<String> ambiguousWbs = new Set<String>();
+        // Build maps WBS -> CVR/Project/WBS_Key
+        // If WBS reused, keep first mapping deterministically and count ambiguity.
+        Map<String, Id>     wbsToCvr     = new Map<String, Id>();
+        Map<String, Id>     wbsToProject = new Map<String, Id>();
+        Map<String, String> wbsToKey     = new Map<String, String>();
 
         for (Project_WBS__c m : [
-            SELECT WBS_Code__c, CVR__c, Project__c
+            SELECT WBS_Code__c, WBS_Key__c, CVR__c, Project__c, CreatedDate
             FROM Project_WBS__c
             WHERE WBS_Code__c IN :wbsCodes
               AND CVR__c != NULL
               AND Project__c != NULL
+              AND WBS_Key__c != NULL
+            ORDER BY CreatedDate ASC
         ]) {
             String w = (m.WBS_Code__c == null) ? null : m.WBS_Code__c.trim();
             if (String.isBlank(w)) continue;
 
             Id cvrId = m.CVR__c;
             Id projectId = m.Project__c;
+            String key = (m.WBS_Key__c == null) ? null : m.WBS_Key__c.trim();
+            if (String.isBlank(key)) continue;
 
             if (!wbsToCvr.containsKey(w)) {
+                // first mapping wins
                 wbsToCvr.put(w, cvrId);
                 wbsToProject.put(w, projectId);
+                wbsToKey.put(w, key);
             } else {
-                // Ambiguous if either CVR or Project differs for same WBS
-                if (wbsToCvr.get(w) != cvrId || wbsToProject.get(w) != projectId) {
-                    ambiguousWbs.add(w);
+                // count ambiguity but do NOT block stamping
+                if (wbsToCvr.get(w) != cvrId || wbsToProject.get(w) != projectId || wbsToKey.get(w) != key) {
+                    ambiguous++;
+                    if (DEBUG && dbgSampleAmbiguous.size() < DEBUG_SAMPLE_SIZE) {
+                        dbgSampleAmbiguous.add(
+                            'WBS=' + w +
+                            ' existing(CVR=' + wbsToCvr.get(w) + ', Project=' + wbsToProject.get(w) + ', Key=' + wbsToKey.get(w) + ')' +
+                            ' vs new(CVR=' + cvrId + ', Project=' + projectId + ', Key=' + key + ')'
+                        );
+                    }
                 }
             }
         }
@@ -101,10 +115,11 @@ global class CoupaStampCvrBatch implements Database.Batchable<SObject>, Database
                 'CoupaStampCvrBatch.execute scope=' + scope.size() +
                 ' uniqueWbs=' + wbsCodes.size() +
                 ' mappingsFound=' + wbsToCvr.size() +
-                ' ambiguousWbs=' + ambiguousWbs.size()
+                ' ambiguousSeen=' + ambiguous
             );
         }
 
+        // Stamp CVR__c + Project__c + WBS_Key__c (only when changed)
         List<Coupa_Data__c> updates = new List<Coupa_Data__c>();
 
         for (Coupa_Data__c r : scope) {
@@ -117,25 +132,35 @@ global class CoupaStampCvrBatch implements Database.Batchable<SObject>, Database
                 continue;
             }
 
-            if (ambiguousWbs.contains(w)) {
-                ambiguous++;
-                if (DEBUG && dbgSampleAmbiguous.size() < DEBUG_SAMPLE_SIZE) {
-                    dbgSampleAmbiguous.add('Id=' + r.Id + ' WBS=' + w);
-                }
-                continue;
-            }
-
             Id cvrId = wbsToCvr.get(w);
             Id projectId = wbsToProject.get(w);
+            String key = wbsToKey.get(w);
 
-            if (cvrId != null && projectId != null) {
-                r.CVR__c = cvrId;
-                r.Project__c = projectId;
-                updates.add(r);
-                stamped++;
+            if (cvrId != null && projectId != null && !String.isBlank(key)) {
+                Boolean changed = false;
 
-                if (DEBUG && dbgSampleStamped.size() < DEBUG_SAMPLE_SIZE) {
-                    dbgSampleStamped.add('Id=' + r.Id + ' WBS=' + w + ' -> CVR=' + cvrId + ' Project=' + projectId);
+                if (r.CVR__c != cvrId) {
+                    r.CVR__c = cvrId;
+                    changed = true;
+                }
+                if (r.Project__c != projectId) {
+                    r.Project__c = projectId;
+                    changed = true;
+                }
+                if (String.isBlank(r.WBS_Key__c) || r.WBS_Key__c.trim() != key) {
+                    r.WBS_Key__c = key;
+                    changed = true;
+                }
+
+                if (changed) {
+                    updates.add(r);
+                    stamped++;
+                    if (DEBUG && dbgSampleStamped.size() < DEBUG_SAMPLE_SIZE) {
+                        dbgSampleStamped.add(
+                            'Id=' + r.Id + ' WBS=' + w +
+                            ' -> CVR=' + cvrId + ' Project=' + projectId + ' Key=' + key
+                        );
+                    }
                 }
             } else {
                 unmatched++;

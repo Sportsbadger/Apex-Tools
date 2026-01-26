@@ -12,14 +12,14 @@ global class SapStampCvrBatch implements Database.Batchable<SObject>, Database.S
     global Integer unmatched = 0;
     global Integer ambiguous = 0;
 
-    // Primary constructor (allows orchestration control)
+    // Primary constructor (with orchestration control)
     global SapStampCvrBatch(DateTime startDt, DateTime endDt, Boolean chainBilling) {
         this.startDt = startDt;
         this.endDt   = endDt;
         this.chainBilling = chainBilling;
     }
 
-    // Backwards-compatible constructor (no chaining by default)
+    // Backwards-compatible constructor (without orchestration control)
     global SapStampCvrBatch(DateTime startDt, DateTime endDt) {
         this(startDt, endDt, false);
     }
@@ -38,8 +38,9 @@ global class SapStampCvrBatch implements Database.Batchable<SObject>, Database.S
     global Set<String> dbgWbsSeen = new Set<String>(); // track unique WBS seen (sample)
 
     global Database.QueryLocator start(Database.BatchableContext bc) {
+        // Include WBS_Key__c
         String soql =
-            'SELECT Id, L4_WBS__c, CVR__c, Project__c, Type__c ' +
+            'SELECT Id, L4_WBS__c, WBS_Key__c, CVR__c, Project__c, Type__c ' +
             'FROM SAP_Data__c ' +
             'WHERE CreatedDate >= :startDt ' +
             'AND CreatedDate < :endDt ' +
@@ -70,31 +71,47 @@ global class SapStampCvrBatch implements Database.Batchable<SObject>, Database.S
         }
         if (wbsCodes.isEmpty()) return;
 
-        // Build map WBS -> CVR and WBS -> Project, tracking ambiguous WBS codes
-        Map<String, Id> wbsToCvr = new Map<String, Id>();
-        Map<String, Id> wbsToProject = new Map<String, Id>();
-        Set<String> ambiguousWbs = new Set<String>();
+        // Build maps WBS -> CVR, WBS -> Project, WBS -> WBS_Key.
+        // If a WBS is reused (multiple mapping rows), we KEEP THE FIRST (deterministic order)
+        // and increment ambiguous if we see a conflicting mapping.
+        Map<String, Id>     wbsToCvr     = new Map<String, Id>();
+        Map<String, Id>     wbsToProject = new Map<String, Id>();
+        Map<String, String> wbsToKey     = new Map<String, String>();
 
+        // Deterministic tie-break: earliest-created mapping wins 
         for (Project_WBS__c m : [
-            SELECT WBS_Code__c, CVR__c, Project__c
+            SELECT WBS_Code__c, WBS_Key__c, CVR__c, Project__c, CreatedDate
             FROM Project_WBS__c
             WHERE WBS_Code__c IN :wbsCodes
               AND CVR__c != NULL
               AND Project__c != NULL
+              AND WBS_Key__c != NULL
+            ORDER BY CreatedDate ASC
         ]) {
             String w = (m.WBS_Code__c == null) ? null : m.WBS_Code__c.trim();
             if (String.isBlank(w)) continue;
 
             Id cvrId = m.CVR__c;
             Id projectId = m.Project__c;
+            String key = (m.WBS_Key__c == null) ? null : m.WBS_Key__c.trim();
+            if (String.isBlank(key)) continue;
 
-            // Ambiguity check: same WBS mapping to different CVR/Project
             if (!wbsToCvr.containsKey(w)) {
+                // first mapping wins
                 wbsToCvr.put(w, cvrId);
                 wbsToProject.put(w, projectId);
+                wbsToKey.put(w, key);
             } else {
-                if (wbsToCvr.get(w) != cvrId || wbsToProject.get(w) != projectId) {
-                    ambiguousWbs.add(w);
+                // record ambiguity but do NOT block stamping
+                if (wbsToCvr.get(w) != cvrId || wbsToProject.get(w) != projectId || wbsToKey.get(w) != key) {
+                    ambiguous++;
+                    if (DEBUG && dbgSampleAmbiguous.size() < DEBUG_SAMPLE_SIZE) {
+                        dbgSampleAmbiguous.add(
+                            'WBS=' + w +
+                            ' existing(CVR=' + wbsToCvr.get(w) + ', Project=' + wbsToProject.get(w) + ', Key=' + wbsToKey.get(w) + ')' +
+                            ' vs new(CVR=' + cvrId + ', Project=' + projectId + ', Key=' + key + ')'
+                        );
+                    }
                 }
             }
         }
@@ -104,11 +121,12 @@ global class SapStampCvrBatch implements Database.Batchable<SObject>, Database.S
                 'SapStampCvrBatch.execute scope=' + scope.size() +
                 ' uniqueWbs=' + wbsCodes.size() +
                 ' mappingsFound=' + wbsToCvr.size() +
-                ' ambiguousWbs=' + ambiguousWbs.size()
+                ' ambiguousSeen=' + ambiguous
             );
         }
 
-        // Stamp CVR__c + Project__c (skip ambiguous WBS)
+        // Stamp CVR__c + Project__c + WBS_Key__c
+        // Only update rows where at least one value will change.
         List<SAP_Data__c> updates = new List<SAP_Data__c>();
 
         for (SAP_Data__c r : scope) {
@@ -122,28 +140,36 @@ global class SapStampCvrBatch implements Database.Batchable<SObject>, Database.S
                 continue;
             }
 
-            if (ambiguousWbs.contains(w)) {
-                ambiguous++;
-                if (DEBUG && dbgSampleAmbiguous.size() < DEBUG_SAMPLE_SIZE) {
-                    dbgSampleAmbiguous.add('Id=' + r.Id + ' Type=' + r.Type__c + ' WBS=' + w);
-                }
-                continue;
-            }
-
             Id cvrId = wbsToCvr.get(w);
             Id projectId = wbsToProject.get(w);
+            String key = wbsToKey.get(w);
 
-            if (cvrId != null && projectId != null) {
-                r.CVR__c = cvrId;
-                r.Project__c = projectId;
-                updates.add(r);
-                stamped++;
+            if (cvrId != null && projectId != null && !String.isBlank(key)) {
+                Boolean changed = false;
 
-                if (DEBUG && dbgSampleStamped.size() < DEBUG_SAMPLE_SIZE) {
-                    dbgSampleStamped.add(
-                        'Id=' + r.Id + ' Type=' + r.Type__c + ' WBS=' + w +
-                        ' -> CVR=' + cvrId + ' Project=' + projectId
-                    );
+                if (r.CVR__c != cvrId) {
+                    r.CVR__c = cvrId;
+                    changed = true;
+                }
+                if (r.Project__c != projectId) {
+                    r.Project__c = projectId;
+                    changed = true;
+                }
+                if (String.isBlank(r.WBS_Key__c) || r.WBS_Key__c.trim() != key) {
+                    r.WBS_Key__c = key;
+                    changed = true;
+                }
+
+                if (changed) {
+                    updates.add(r);
+                    stamped++;
+
+                    if (DEBUG && dbgSampleStamped.size() < DEBUG_SAMPLE_SIZE) {
+                        dbgSampleStamped.add(
+                            'Id=' + r.Id + ' Type=' + r.Type__c + ' WBS=' + w +
+                            ' -> CVR=' + cvrId + ' Project=' + projectId + ' Key=' + key
+                        );
+                    }
                 }
             } else {
                 unmatched++;
@@ -172,7 +198,7 @@ global class SapStampCvrBatch implements Database.Batchable<SObject>, Database.S
         }
 
         if (chainBilling) {
-            Database.executeBatch(new SapStampBillingLinesCvrBatch(startDt, endDt), 200);
+            Database.executeBatch(new SapStampBillingLinesCvrBatch(startDt, endDt), 1000);
         }
     }
 }

@@ -22,7 +22,7 @@ global class SapStampBillingLinesScheduler implements Schedulable {
 
         DateTime startDt = endDt.addDays(-1);
 
-        Integer batchSize = 200;
+        Integer batchSize = 1000;
         Database.executeBatch(
             new SapStampBillingLinesCvrBatch(startDt, endDt),
             batchSize

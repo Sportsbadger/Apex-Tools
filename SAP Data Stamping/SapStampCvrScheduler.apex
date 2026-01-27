@@ -43,7 +43,7 @@ global class SapStampCvrScheduler implements Schedulable {
 
         Database.executeBatch(
             new SapStampCvrBatch(startDt, endDt, true), // chain billing in finish()
-            200
+            1000
         );
     }
 

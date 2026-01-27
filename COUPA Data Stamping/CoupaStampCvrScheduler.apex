@@ -60,7 +60,7 @@ global class CoupaStampCvrScheduler implements Schedulable {
 
         Database.executeBatch(
             new CoupaStampCvrBatch(startDt, endDt, true),
-            200
+            1000
         );
     }
 

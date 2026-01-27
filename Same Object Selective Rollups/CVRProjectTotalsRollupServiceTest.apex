@@ -172,6 +172,49 @@ private class CVRProjectTotalsRollupServiceTest {
     }
 
     // -------------------------------------------------------------------------
+    // Scheduler coverage:
+    // Schedules the Rollup scheduler and asserts the same outputs.
+    // -------------------------------------------------------------------------
+    @IsTest
+    static void testRollupSchedulerExecutes() {
+        Set<Id> parentsWithKids = getParentIdsWithChildren();
+        System.assert(!parentsWithKids.isEmpty(), 'Test setup should create at least one parent with children');
+
+        // Use a valid cron expression; the scheduled job fires at Test.stopTest()
+        String cron = '0 0 0 1 1 ? 2099';
+
+        Test.startTest();
+            System.schedule('CVR Project Totals Rollup - Scheduler Test', cron, new CVRProjectTotalsRollupScheduler());
+        Test.stopTest();
+
+        // Parent with kids should now be rolled up
+        CVR__c parentWithKids = [
+            SELECT Id, SAP_Costs_Invoiced__c, Coupa_PO__c, Manual_Sales__c
+            FROM CVR__c
+            WHERE CVR_Type__c = 'Project'
+              AND Id IN :parentsWithKids
+            LIMIT 1
+        ];
+
+        System.assertEquals(30, parentWithKids.SAP_Costs_Invoiced__c);
+        System.assertEquals(300, parentWithKids.Coupa_PO__c);
+        System.assertEquals(3000, parentWithKids.Manual_Sales__c);
+
+        // Parent with no kids should be zeroed (service config uses zeroParentsWithNoChildren=true)
+        CVR__c parentNoKids = [
+            SELECT Id, SAP_Costs_Invoiced__c, Coupa_PO__c, Manual_Sales__c
+            FROM CVR__c
+            WHERE CVR_Type__c = 'Project'
+              AND Id NOT IN :parentsWithKids
+            LIMIT 1
+        ];
+
+        System.assertEquals(0, parentNoKids.SAP_Costs_Invoiced__c);
+        System.assertEquals(0, parentNoKids.Coupa_PO__c);
+        System.assertEquals(0, parentNoKids.Manual_Sales__c);
+    }
+
+    // -------------------------------------------------------------------------
     // Spec validation coverage: hit validateSpec error branches.
     // -------------------------------------------------------------------------
     @IsTest
